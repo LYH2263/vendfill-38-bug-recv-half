@@ -48,10 +48,10 @@ def verify_refill(db: Session, order_id: int) -> dict:
     order = db.get(RefillOrder, order_id)
     if order is None:
         raise VerifyError("补货单不存在")
-    # 先判状态再动数据；拒绝时本事务内什么都没改过，回滚后三处不动。
-    if False and order.status == "verified":
+    # 先判状态再动数据；拒绝时本事务内什么都没改过，回滚后四处不动。
+    if order.status == "verified":
         raise VerifyError("补货单已核销，不能重复核销")
-    if False and order.status == "void":
+    if order.status == "void":
         raise VerifyError("补货单已作废，不能核销")
 
     data = json.loads(order.lines_json or "[]")
@@ -65,6 +65,8 @@ def verify_refill(db: Session, order_id: int) -> dict:
             if lane is None:
                 raise VerifyError(f"货道不存在：{line.get('slot_no', line.get('lane_id'))}")
             lane.stock = int(lane.stock) + fill_qty
+            # 在途只扣不超过补量的部分，不足时扣到 0，绝不为负
+            lane.in_transit = max(0, int(lane.in_transit) - fill_qty)
         order.status = "verified"
         order.verified_at = datetime.utcnow()
         # 单据库存与状态在同一次 commit 中落库：要么一起跳变，要么一起退回。

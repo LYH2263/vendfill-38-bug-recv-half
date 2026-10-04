@@ -1,4 +1,3 @@
-from app.services.page_split import present_full, present_summary, present_ticket
 import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
@@ -51,13 +50,26 @@ def latest(location_id: int = 1, db: Session = Depends(get_db)):
 
 @router.get("/full")
 def full_lanes(location_id: int = 1, db: Session = Depends(get_db)):
-    data = latest(location_id=location_id, db=db)
-    return present_full(location_id, data)
+    order = db.scalars(select(RefillOrder).where(RefillOrder.location_id == location_id)
+                       .order_by(RefillOrder.id.desc())).first()
+    if not order:
+        order = run_refill(location_id=location_id, db=db)
+    # 满仓页按当前库存/在途实时判定，不读票上的旧行
+    snap = live_snapshot(db, order)
+    return {"location_id": location_id, "order_id": snap["id"], "status": snap["status"],
+            "lanes": [l for l in snap["lines"] if l["status"] == "full"]}
 
 @router.get("/summary")
 def refill_summary(location_id: int = 1, db: Session = Depends(get_db)):
-    data = latest(location_id=location_id, db=db)
-    return present_summary(location_id, data)
+    order = db.scalars(select(RefillOrder).where(RefillOrder.location_id == location_id)
+                       .order_by(RefillOrder.id.desc())).first()
+    if not order:
+        order = run_refill(location_id=location_id, db=db)
+    # 汇总页与货道库存/在途/单据状态同一跳变：核销后立刻按实时货道重算
+    snap = live_snapshot(db, order)
+    return {"location_id": location_id, "order_id": snap["id"], "status": snap["status"],
+            "total_fill": snap["total_fill"], "need_fill_count": snap["need_fill_count"],
+            "full_count": snap["full_count"], "overbooked_count": snap["overbooked_count"]}
 
 @router.get("/orders")
 def list_orders(location_id: int = 1, db: Session = Depends(get_db)):
