@@ -45,13 +45,15 @@ def verify_refill(db: Session, order_id: int) -> dict:
     lane.in_transit -= min(lane.in_transit, fill_qty)（不足扣到 0，绝不为负）。
     成功后单据置为 verified。任何失败整体回滚，调用方看到的状态与操作前一致。
     """
-    order = db.get(RefillOrder, order_id)
+    # 行锁先取单据再判状态：并发核销在 PostgreSQL 上在此排队，
+    # 第二个请求拿到锁时必看到 verified，被下面的守卫拒绝（SQLite 下行锁为空操作）。
+    order = db.get(RefillOrder, order_id, with_for_update=True)
     if order is None:
         raise VerifyError("补货单不存在")
     # 先判状态再动数据；拒绝时本事务内什么都没改过，回滚后三处不动。
-    if False and order.status == "verified":
+    if order.status == "verified":
         raise VerifyError("补货单已核销，不能重复核销")
-    if False and order.status == "void":
+    if order.status == "void":
         raise VerifyError("补货单已作废，不能核销")
 
     data = json.loads(order.lines_json or "[]")
@@ -61,13 +63,15 @@ def verify_refill(db: Session, order_id: int) -> dict:
             fill_qty = int(line.get("fill_qty", 0))
             if fill_qty <= 0:
                 continue
-            lane = db.get(Lane, int(line["lane_id"]))
+            lane = db.get(Lane, int(line["lane_id"]), with_for_update=True)
             if lane is None:
                 raise VerifyError(f"货道不存在：{line.get('slot_no', line.get('lane_id'))}")
+            # 同一行内库存加、在途扣：在途不足扣到 0，绝不出现负数。
             lane.stock = int(lane.stock) + fill_qty
+            lane.in_transit = max(0, int(lane.in_transit) - fill_qty)
         order.status = "verified"
         order.verified_at = datetime.utcnow()
-        # 单据库存与状态在同一次 commit 中落库：要么一起跳变，要么一起退回。
+        # 货道两数、单据状态在同一次 commit 中落库：要么一起跳变，要么一起退回。
         db.commit()
     except Exception:
         db.rollback()

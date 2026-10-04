@@ -1,4 +1,3 @@
-from app.services.page_split import present_full, present_summary, present_ticket
 import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
@@ -40,24 +39,49 @@ def run_refill(location_id: int = 1, db: Session = Depends(get_db)):
     return {"id": order.id, "location_id": location_id, "status": order.status,
             "verified_at": None, **summary}
 
+def _latest_order(db: Session, location_id: int) -> RefillOrder | None:
+    return db.scalars(select(RefillOrder).where(RefillOrder.location_id == location_id)
+                       .order_by(RefillOrder.id.desc())).first()
+
+
+def _live_latest(db: Session, location_id: int) -> RefillOrder:
+    """最新补货单；没有则先生成一张。返回的单据可用于实时快照。"""
+    order = _latest_order(db, location_id)
+    if order is None:
+        run_refill(location_id=location_id, db=db)
+        order = _latest_order(db, location_id)
+    return order
+
+
 @router.get("/latest")
 def latest(location_id: int = 1, db: Session = Depends(get_db)):
-    order = db.scalars(select(RefillOrder).where(RefillOrder.location_id == location_id)
-                       .order_by(RefillOrder.id.desc())).first()
+    order = _latest_order(db, location_id)
     if not order:
         return run_refill(location_id=location_id, db=db)
     stored = json.loads(order.lines_json or "{}")
     return {"id": order.id, "location_id": order.location_id, "status": order.status, **stored}
 
+
 @router.get("/full")
 def full_lanes(location_id: int = 1, db: Session = Depends(get_db)):
-    data = latest(location_id=location_id, db=db)
-    return present_full(location_id, data)
+    # 满仓集合按当前库存/在途实时判定，与货道数字同一次读取，不读票上冻结行。
+    snap = live_snapshot(db, _live_latest(db, location_id))
+    return {"location_id": location_id, "lanes": [l for l in snap["lines"] if l["status"] == "full"]}
+
 
 @router.get("/summary")
 def refill_summary(location_id: int = 1, db: Session = Depends(get_db)):
-    data = latest(location_id=location_id, db=db)
-    return present_summary(location_id, data)
+    # 待补/满仓/超占与建议补量全部由实时货道算出，与货道两数、票状态同一跳。
+    snap = live_snapshot(db, _live_latest(db, location_id))
+    return {
+        "location_id": location_id,
+        "order_id": snap["id"],
+        "status": snap["status"],
+        "total_fill": snap["total_fill"],
+        "need_fill_count": snap["need_fill_count"],
+        "full_count": snap["full_count"],
+        "overbooked_count": snap["overbooked_count"],
+    }
 
 @router.get("/orders")
 def list_orders(location_id: int = 1, db: Session = Depends(get_db)):

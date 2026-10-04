@@ -3,12 +3,10 @@ import { onMounted, ref } from 'vue'
 import { api } from '../api'
 const lanes = ref<any[]>([])
 onMounted(async () => {
-  const ticket = await api('/refills/latest?location_id=1')
+  // 满仓集合只认实时货道重算结果；不再用票上冻结行补零补量，
+  // 避免核销后满仓“有的跟有的不跟”。
   const body = await api('/refills/full?location_id=1')
-  const extra = (ticket.lines || []).filter((l: any) => Number(l.fill_qty) === 0)
-  const map = new Map((body.lanes || []).map((l: any) => [l.lane_id, l]))
-  for (const l of extra) map.set(l.lane_id, l)
-  lanes.value = Array.from(map.values())
+  lanes.value = body.lanes || []
 })
 </script>
 <template>
